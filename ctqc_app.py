@@ -2232,7 +2232,7 @@ def get_active_slices(slices: list, active_series) -> list:
 
 with st.sidebar:
     st.markdown('<div class="vitTitle">⚕ CT Phantom QC</div>', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:10px;color:#3a5060;letter-spacing:2px;margin-bottom:12px;">VIRTUAL IMAGING TRIAL · v3.0</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:10px;color:#3a5060;letter-spacing:2px;margin-bottom:12px;">& VIRTUAL IMAGING TRIAL · v1.0</div>', unsafe_allow_html=True)
 
     if not HAS_PYDICOM:
         st.markdown('<div class="warnbox">pydicom ไม่พบ — <code>pip install pydicom</code></div>',
