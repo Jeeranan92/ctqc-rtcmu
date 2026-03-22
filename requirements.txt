@@ -1,0 +1,10 @@
+streamlit
+pydicom
+numpy
+scipy
+matplotlib
+Pillow
+scikit-image
+pandas
+opencv-python-headless
+reportlab
