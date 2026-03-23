@@ -29,6 +29,7 @@ import streamlit as st
 import matplotlib.patches as patches
 import pandas as pd
 import numpy as np
+import uuid
 
 from scipy.signal import find_peaks
 from scipy.ndimage import center_of_mass
@@ -1179,7 +1180,7 @@ def fig2img(fig):
     fig.savefig(
         buf,
         format="png",
-        dpi=130,
+        dpi=200,
         bbox_inches=None,
         pad_inches=0
     )
@@ -2477,10 +2478,10 @@ if _page == "home":
           <span class="tool-card-icon">🏥</span>
           <div class="tool-card-title">Standard Basic QC</div>
           <div class="tool-card-desc">
-            ACR/AAPM มาตรฐาน · Geometry · Square 50 mm · CT Number Linearity<br>
+            IAEA มาตรฐาน · Geometry · Square 50 mm · CT Number Linearity<br>
             ตรวจสอบคุณภาพพื้นฐานของ CT scanner
           </div>
-          <span class="tool-card-tag tag-std">STANDARD · ACR</span>
+          <span class="tool-card-tag tag-std">STANDARD · IAEA</span>
         </div>
         """, unsafe_allow_html=True)
         if st.button("เปิด Standard QC →", use_container_width=True, key="nav_basicqc"):
@@ -2694,23 +2695,53 @@ def run_geometry_qc(hu, px):
     diff_mm     = diameter_mm - nominalDiameter
     isPass      = abs(diff_mm) <= tol_mm
 
+    # ── ขยาย 3x ก่อน render ──
+    SCALE = 3
     img_norm = cv2.normalize(hu, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     output   = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
-    cv2.circle(output, (cx, cy), r, (0,255,255), 2)
-    cv2.line(output,  (cx, cy-r), (cx, cy+r), (0,255,0), 1)
-    cv2.line(output,  (cx-r, cy), (cx+r, cy), (255,0,0), 2)
-    cv2.putText(output, f"D = {diameter_mm:.1f} mm", (30, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                (0,255,0) if isPass else (0,0,255), 2)
+    output   = cv2.resize(output, (output.shape[1]*SCALE, output.shape[0]*SCALE),
+                          interpolation=cv2.INTER_LINEAR)
 
-    margin = max(5, int(r * 0.2))
-    x1 = max(0, cx-r-margin); x2 = min(output.shape[1], cx+r+margin)
-    y1 = max(0, cy-r-margin); y2 = min(output.shape[0], cy+r+margin)
+    cxs, cys, rs = cx*SCALE, cy*SCALE, r*SCALE
+
+    # วงกลม phantom
+    cv2.circle(output, (cxs, cys), rs, (0, 255, 255), 2)
+
+    # เส้นแนวตั้ง (Vertical diameter)
+    cv2.line(output, (cxs, cys - rs), (cxs, cys + rs), (0, 255, 0), 2)
+
+    # เส้นแนวนอน (Horizontal diameter)
+    cv2.line(output, (cxs - rs, cys), (cxs + rs, cys), (255, 100, 0), 2)
+
+    col_txt = (0, 255, 0) if isPass else (0, 0, 255)
+
+    # ตัวเลขแนวตั้ง
+    cv2.putText(output,
+                f"V: {diameter_mm:.2f} mm",
+                (cxs + 10, cys - rs//2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+
+    # ตัวเลขแนวนอน
+    cv2.putText(output,
+                f"H: {diameter_mm:.2f} mm",
+                (cxs - rs + 10, cys - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 0), 2, cv2.LINE_AA)
+
+    # PASS/FAIL
+    cv2.putText(output,
+                "PASS" if isPass else "FAIL",
+                (cxs - 60, cys + rs + 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.2, col_txt, 3, cv2.LINE_AA)
+
+    margin = max(5, int(r * 0.2)) * SCALE
+    x1 = max(0, cxs - rs - margin); x2 = min(output.shape[1], cxs + rs + margin)
+    y1 = max(0, cys - rs - margin); y2 = min(output.shape[0], cys + rs + margin)
     zoom = output[y1:y2, x1:x2]
 
     df = pd.DataFrame([[f"{diameter_mm:.2f}", f"{nominalDiameter}",
                         f"{diff_mm:.2f}", "PASS" if isPass else "FAIL"]],
                       columns=["Measured (mm)", "Nominal (mm)", "Diff (mm)", "Status"])
+
     return {"image": zoom, "diameter": diameter_mm, "nominal": nominalDiameter,
             "tol": tol_mm, "diff": diff_mm, "pass": isPass, "df": df}, None
 
@@ -2821,25 +2852,31 @@ def run_square_qc(hu, px):
     # ─────────────────────────
     # measure
     # ─────────────────────────
-    Pts = np.vstack([C4, C4[:1]])
-
-    img_full = cv2.normalize(hu, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    out = cv2.cvtColor(img_full, cv2.COLOR_GRAY2BGR)
-
-    cv2.rectangle(out, (x1, y1), (x2, y2), (255, 255, 0), 1)
-    for (px_x, px_y) in C4.astype(int):
-        cv2.circle(out, (px_x, px_y), 6, (0, 255, 255), 1)
-
     tol2 = nominal * 0.02
     rows = []
     pass_all = []
     side_labels = ["Top", "Right", "Bottom", "Left"]
 
+    img_full = cv2.normalize(hu, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    out = cv2.cvtColor(img_full, cv2.COLOR_GRAY2BGR)
+
+    # ขยาย 3x ก่อน putText → ตัวเลขคมชัด
+    SCALE = 3
+    out = cv2.resize(out, (out.shape[1]*SCALE, out.shape[0]*SCALE),
+                     interpolation=cv2.INTER_LINEAR)
+    x1 *= SCALE; x2 *= SCALE; y1 *= SCALE; y2 *= SCALE
+    C4  = C4 * SCALE
+    Pts = np.vstack([C4, C4[:1]])
+
+    cv2.rectangle(out, (x1, y1), (x2, y2), (255, 255, 0), 1)
+    for (px_x, px_y) in C4.astype(int):
+        cv2.circle(out, (px_x, px_y), 6*SCALE, (0, 255, 255), 1)
+
     for i in range(4):
         p1v = Pts[i]
         p2v = Pts[i + 1]
 
-        dist_mm = float(np.linalg.norm(p2v - p1v) * px)
+        dist_mm = float(np.linalg.norm(p2v - p1v) * px / SCALE)
         diff = abs(dist_mm - nominal)
         ok = diff <= tol2
         pass_all.append(ok)
@@ -2853,15 +2890,15 @@ def run_square_qc(hu, px):
         ])
 
         col_cv = (0, 200, 0) if ok else (0, 0, 255)
-        cv2.line(out, tuple(p1v.astype(int)), tuple(p2v.astype(int)), col_cv, 1)
+        cv2.line(out, tuple(p1v.astype(int)), tuple(p2v.astype(int)), col_cv, 2)
 
         mid = ((p1v + p2v) / 2).astype(int)
         cv2.putText(
             out,
             f"{dist_mm:.1f}mm",
-            (mid[0] - 15, mid[1] + 8),
+            (mid[0] - 40, mid[1] + 20),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.25,
+            0.6,
             (255, 255, 255),
             1,
             cv2.LINE_AA
@@ -2869,7 +2906,7 @@ def run_square_qc(hu, px):
 
     overallPass = all(pass_all)
 
-    margin_z = max(5, int(round(0.10 * (template_mm / px))))
+    margin_z = max(5, int(round(0.10 * (template_mm / px)))) * SCALE
     zx1 = max(0, x1 - margin_z)
     zx2 = min(out.shape[1] - 1, x2 + margin_z)
     zy1 = max(0, y1 - margin_z)
@@ -2884,7 +2921,6 @@ def run_square_qc(hu, px):
     warn = "" if use_detection else " (geometry mode — hole detection not used)"
     return {"image": zoom, "df": df, "pass": overallPass, "warn": warn}, None
 
-
 def run_linearity_qc(hu, px):
     """
     CT Number Linearity QC
@@ -2898,11 +2934,17 @@ def run_linearity_qc(hu, px):
     R = int(outerRadius)
     innerR = int(innerRadius)
 
+    SCALE = 3
     img_norm = cv2.normalize(hu, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     output = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
+    output = cv2.resize(output, (output.shape[1]*SCALE, output.shape[0]*SCALE),
+                        interpolation=cv2.INTER_LINEAR)
 
-    cv2.circle(output, (cx, cy), R, (255, 0, 0), 2)
-    cv2.circle(output, (cx, cy), innerR, (255, 255, 255), 2)
+    cx  *= SCALE;  cy  *= SCALE
+    R   *= SCALE;  innerR *= SCALE
+
+    cv2.circle(output, (cx, cy), R,      (255, 0, 0),     2)
+    cv2.circle(output, (cx, cy), innerR, (255, 255, 255),  2)
 
     inserts = detect_linearity_inserts(hu, px)
 
@@ -2948,11 +2990,15 @@ def run_linearity_qc(hu, px):
 
         rows.append([ins["label"], material, round(meanHU_val, 2), round(sdHU, 2)])
 
-        cv2.circle(output, (ix, iy), roi_r, (0, 255, 255), 1)
-        cv2.putText(output, material[:5], (ix - 22, iy - 13),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 0), 1)
-        cv2.putText(output, f"{meanHU_val:.0f}", (ix - 22, iy + 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 0), 1)
+        ix *= SCALE;  iy *= SCALE;  roi_r *= SCALE
+
+        cv2.circle(output, (ix, iy), roi_r, (0, 255, 255), 2)
+        cv2.putText(output, material[:5],
+                    (ix - 60, iy - 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(output, f"{meanHU_val:.1f} HU",
+                    (ix - 60, iy + 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2, cv2.LINE_AA)
 
     if not rows:
         return None, "❌ ไม่สามารถ sample ROI ได้"
@@ -3217,16 +3263,28 @@ def run_slice_thickness_qc(hu, px, nominal, mode="fine", offset_x=0, offset_y=0)
     slice_mm = num_beads * pitch_mm if num_beads >= 1 else float("nan")
 
     # ── F. PASS / FAIL ──
-    nom = nominal
-    if nom <= 1.0:
-        tol_min, tol_max = 0.0, nom + 0.5
-    elif nom <= 2.0:
-        tol_min, tol_max = 0.5 * nom, 1.5 * nom
-    else:
-        tol_min, tol_max = nom - 1.0, nom + 1.0
+    nom = float(nominal)
 
-    if not np.isnan(slice_mm):
-        is_pass = tol_min <= slice_mm <= tol_max
+    # tolerance (เหมือน MATLAB)
+    if nom <= 1.0:
+        tol_min = 0.0
+        tol_max = nom + 0.5
+    elif nom <= 2.0:
+        tol_min = 0.5 * nom
+        tol_max = 1.5 * nom
+    else:
+        tol_min = nom - 1.0
+        tol_max = nom + 1.0
+
+    # ใช้ bead-based เท่านั้น (สำคัญ!)
+    if num_beads >= 1:
+        slice_mm_bead = num_beads * pitch_mm
+    else:
+        slice_mm_bead = float("nan")
+
+    # PASS / FAIL
+    if not np.isnan(slice_mm_bead) and (tol_min <= slice_mm_bead <= tol_max):
+        is_pass = True
     else:
         is_pass = False
 
@@ -3287,10 +3345,19 @@ def run_slice_thickness_qc(hu, px, nominal, mode="fine", offset_x=0, offset_y=0)
 
     plt.tight_layout(pad=0.8)
 
+    # แปลง fig เป็น image array
+    buf_st = io.BytesIO()
+    fig.savefig(buf_st, format="png", dpi=150, bbox_inches="tight")
+    buf_st.seek(0)
+    from PIL import Image as _PIL
+    _img_arr = np.array(_PIL.open(buf_st))
+    buf_st.close()
+
     return {
         "fig":        fig,
+        "img_arr":    _img_arr,    
         "mode":       mode,
-        "slice_mm":   slice_mm,
+        "slice_mm":   slice_mm_bead, 
         "fwhm_mm":    fwhm_mm,
         "num_beads":  num_beads,
         "fwhm_left":  fwhm_left,
@@ -3304,6 +3371,18 @@ def run_slice_thickness_qc(hu, px, nominal, mode="fine", offset_x=0, offset_y=0)
         "y_end":      y_end,
     }, None
 
+def reset_zoom():
+    st.session_state["coarse_zoom"] = 1.0
+
+st.number_input(
+    "🔍 Zoom",
+    min_value=1.0,
+    max_value=8.0,
+    step=0.5,
+    key="coarse_zoom"
+)
+
+st.button("🔄 Reset Zoom", on_click=reset_zoom)
 
 def step_icon(done):
     return "🟢 ✓" if done else "⚪"
@@ -3399,25 +3478,10 @@ def find_mtf_metrics(f, mtf):
 #  UNIFORMITY / CT ACCURACY / NOISE QC  (from MATLAB)
 # ══════════════════════════════════════════════════
 
-def _find_inner_radius(hu, cx, cy, r_phantom):
-    """หา inner disk radius จาก radial HU profile (เหมือน MATLAB)"""
-    h, w   = hu.shape
-    xx, yy = np.meshgrid(np.arange(w), np.arange(h))
-    dist0  = np.sqrt((xx - cx)**2 + (yy - cy)**2)
-    HU_s   = cv2.GaussianBlur(hu.astype(np.float32), (0, 0), 4)
-    rVals  = np.arange(1, max(2, int(r_phantom * 0.8)))
-    mHU    = []
-    for rv in rVals:
-        ring = HU_s[np.abs(dist0 - rv) < 1]
-        mHU.append(float(np.mean(ring)) if len(ring) > 0 else 0.0)
-    mHU = np.array(mHU)
-    return int(rVals[int(np.argmax(np.abs(np.diff(mHU))))])
-
-
 def _draw_label_box(img, lines_txt, x, y, bg_color=(0,0,0), txt_color=(0,255,255)):
     """วาด multi-line label box บนภาพ CV2"""
-    fsc, thick = 0.38, 1
-    line_h = 14
+    fsc, thick = 1.0, 3
+    line_h = 40
     # measure max width
     max_w = max(cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, fsc, thick)[0][0]
                 for t in lines_txt)
@@ -3562,24 +3626,36 @@ def run_ct_accuracy_qc(hu, px):
         ("ROI5", cx,           cy - offset,  (255,255,255),(0,0,0)),
     ]
 
+    SCALE = 3
     img_norm = cv2.normalize(hu, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     output   = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
+    output   = cv2.resize(output, (output.shape[1]*SCALE, output.shape[0]*SCALE),
+                          interpolation=cv2.INTER_LINEAR)
 
-    # Outer phantom boundary — cyan
-    cv2.circle(output, (cx, cy), r_phantom, (255, 255, 0), 2)
-    # Inner disk boundary — white
-    cv2.circle(output, (cx, cy), inner_r, (255, 255, 255), 2)
-    # Noise ROI — red
-    cv2.circle(output, (cx, cy), noise_r, (0, 0, 255), 1)
+    cx *= SCALE;  cy *= SCALE
+    r_phantom *= SCALE;  inner_r *= SCALE;  noise_r *= SCALE
+    roi_r *= SCALE;  offset *= SCALE
+
+    cv2.circle(output, (cx, cy), r_phantom, (255, 255, 0),  SCALE)
+    cv2.circle(output, (cx, cy), inner_r,   (255, 255, 255), SCALE)
 
     rows    = []
     hu_vals = {}
 
     for name, rx, ry, circle_col, bg_col in rois:
-        rx = max(roi_r, min(w - 1 - roi_r, rx))
-        ry = max(roi_r, min(h - 1 - roi_r, ry))
+        # rx, ry ยังเป็น original coordinate → scale ก่อน
+        rx_s = int(rx * SCALE)
+        ry_s = int(ry * SCALE)
+        rx_s = max(roi_r, min(output.shape[1] - 1 - roi_r, rx_s))
+        ry_s = max(roi_r, min(output.shape[0] - 1 - roi_r, ry_s))
+
+        # sample HU จาก original coordinate
+        rx_orig    = int(rx)
+        ry_orig    = int(ry)
+        roi_r_orig = roi_r // SCALE
+        
         mask   = np.zeros_like(hu, dtype=np.uint8)
-        cv2.circle(mask, (rx, ry), roi_r, 1, -1)
+        cv2.circle(mask, (rx_orig, ry_orig), roi_r_orig, 1, -1)
         pixels = hu[mask == 1]
         if len(pixels) == 0:
             continue
@@ -3588,30 +3664,13 @@ def run_ct_accuracy_qc(hu, px):
         hu_vals[name] = {"mean": mu, "sd": sd}
         rows.append([name, round(mu, 2), round(sd, 2)])
 
-        # วาดวง ROI
-        cv2.circle(output, (rx, ry), roi_r, circle_col, 1)
-        label_offset = int(roi_r * 3.2)
-        # Label box ใต้วง
+        cv2.circle(output, (rx_s, ry_s), roi_r, circle_col, SCALE)
+        label_offset = int(roi_r * 1.4)
         _draw_label_box(output,
                 [name, f"Mean:{mu:.2f}", f"SD:{sd:.2f}"],
-                rx, ry + label_offset,
+                rx_s, ry_s+130 + label_offset,
                 bg_color=(0, 0, 0),
                 txt_color=(0, 255, 255))
-
-    # Noise label — พื้นหลังแดง ที่ตำแหน่ง 5 นาฬิกา
-    noise_mask = np.zeros_like(hu, dtype=np.uint8)
-    cv2.circle(noise_mask, (cx, cy), noise_r, 1, -1)
-    noise_px  = hu[noise_mask == 1]
-    noise_mu  = float(np.mean(noise_px)) if len(noise_px) > 0 else 0.0
-    noise_sd  = float(np.std(noise_px))  if len(noise_px) > 0 else 0.0
-    angle_5   = math.radians(-60)
-    nx = int(cx + inner_r * 1.2 * math.cos(angle_5))
-    ny = int(cy - inner_r * 1.2 * math.sin(angle_5))
-    _draw_label_box(output,
-                    ["Noise", f"Mean:{noise_mu:.2f}", f"SD:{noise_sd:.2f}"],
-                    nx, ny,
-                    bg_color=(180, 0, 0),
-                    txt_color=(255, 255, 255))
 
     df = pd.DataFrame(rows, columns=["ROI", "Mean HU", "SD"])
 
@@ -3639,8 +3698,6 @@ def run_ct_accuracy_qc(hu, px):
         "uni_pass":  uni_pass,
         "tol_acc":   tol_acc,
         "inner_r":   inner_r,
-        "noise_r":   noise_r,
-        "noise_sd":  noise_sd,
     }, None
 
 def refine_outer_radius(hu, cx, cy, r_init):
@@ -3712,34 +3769,33 @@ def run_noise_qc(hu, px, baseline_noise=None):
     # ─────────────────────────
     # 5. Visualization
     # ─────────────────────────
+    SCALE = 3
     img_norm = cv2.normalize(hu, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     output   = cv2.cvtColor(img_norm, cv2.COLOR_GRAY2BGR)
+    output   = cv2.resize(output, (output.shape[1]*SCALE, output.shape[0]*SCALE),
+                          interpolation=cv2.INTER_LINEAR)
 
-    # 🔵 outer (refined)
-    cv2.circle(output, (cx, cy), r_phantom, (255,255,0), 3)
+    cxs = cx * SCALE;  cys = cy * SCALE
+    r_phantom_s = r_phantom * SCALE
+    inner_r_s   = inner_r   * SCALE
+    noise_r_s   = noise_r   * SCALE
 
-    # ⚪ inner
-    cv2.circle(output, (cx, cy), inner_r, (255,255,255), 2)
-
-    # 🔴 noise
-    cv2.circle(output, (cx, cy), noise_r, (0,0,255), 2)
-
+    cv2.circle(output, (cxs, cys), r_phantom_s, (255,255,0),   SCALE)
+    cv2.circle(output, (cxs, cys), inner_r_s,   (255,255,255), SCALE)
+    cv2.circle(output, (cxs, cys), noise_r_s,   (0,0,255),     SCALE)
     # ─────────────────────────
     # 6. Label
     # ─────────────────────────
     angle_5 = math.radians(-90)
-
-    nx = int(cx + inner_r  * math.cos(angle_5))
-    ny = int(cy - inner_r  * math.sin(angle_5))
-
+    nx = int(cxs + inner_r_s * math.cos(angle_5))
+    ny = int(cys - inner_r_s * math.sin(angle_5))
     _draw_label_box(
         output,
-        ["Noise", f"Mean:{mean_noise:.2f}", f"SD:{measured_noise:.2f}"],
-        nx, ny,
+        ["Noise ROI", f"Mean: {mean_noise:.2f} HU", f"SD: {measured_noise:.2f} HU"],
+        nx, ny-100,
         bg_color=(180, 0, 0),
         txt_color=(255,255,255)
     )
-
     # ─────────────────────────
     # 7. Evaluation
     # ─────────────────────────
@@ -4539,7 +4595,7 @@ if _page == "basicqc":
         if st.session_state.get("basic_square_result"):
             _sqr = st.session_state.basic_square_result
             dark_style()
-            _fig_s, _ax_s = plt.subplots(figsize=(4, 4), facecolor=DARK)
+            _fig_s, _ax_s = plt.subplots(figsize=(6, 6), facecolor=DARK)
             _ax_s.imshow(_sqr["image"][..., ::-1])
             _ax_s.set_title("Square 50mm QC", fontsize=9, color=MUTED)
             _ax_s.axis("off")
@@ -4808,7 +4864,7 @@ if _page == "basicqc":
     hu_current = _sl_basic["hu_orig"]
     px_current = _sl_basic["pixel_spacing"]
     
-    _sc1, _sc2, _sc3 = st.columns([1, 1, 1])
+    _sc1, _sc2,= st.columns([1, 1])
 
     with _sc1:
         _st_nom_input = st.number_input(
@@ -4822,63 +4878,117 @@ if _page == "basicqc":
                             horizontal=True, key="st_mode_radio")
         _st_mode_key = "fine" if "Fine" in _st_mode else "coarse"
         
-    with _sc3:
-        st.markdown("### 🔧 Adjust Profile Line")
 
-        if _st_mode_key == "fine":
+    st.markdown("### 🔧 Adjust Profile Line")
+
+    if _st_mode_key == "fine":
             default_offset_x = -53
-        else:
-            default_offset_x = -93
+    else:
+            default_offset_x = -95
 
-        if "slice_offset_x" not in st.session_state:
+    if "slice_offset_x" not in st.session_state:
             st.session_state.slice_offset_x = default_offset_x
 
-        if st.session_state.get("last_mode") != _st_mode_key:
+    if st.session_state.get("last_mode") != _st_mode_key:
             st.session_state.slice_offset_x = default_offset_x
             st.session_state.last_mode = _st_mode_key
 
-        _lc1, _lc2, _lc3 = st.columns(3)
+    _lc1, _lc2, _lc3 = st.columns(3)
 
-        with _lc1:
+    with _lc1:
             offset_x = st.slider("Shift X (px)", -100, 100, -53, 1, key="slice_offset_x")
 
-        with _lc2:
+    with _lc2:
             offset_y = st.slider("Shift Y (px)", -100, 100, 0, 1, key="slice_offset_y")
 
-        with _lc3:
+    with _lc3:
             angle = st.slider("Angle (deg)", -90, 90, 90, 1, key="slice_angle")
        
-        st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
         
-        if st.button("▶ Run Slice Thickness", use_container_width=True, key="btn_slice"):
-            with st.spinner("Computing profile…"):
-                _stres, _sterr = run_slice_thickness_qc(
-                    hu_current,
-                    px_current,
-                    _st_nom_input,
-                    mode=_st_mode_key,
-                    offset_x=offset_x,
-                    offset_y=offset_y,
-                )
-            if _sterr:
-                st.markdown(f'<div class="warnbox">{_sterr}</div>', unsafe_allow_html=True)
-            else:
-                if _st_mode_key == "fine":
-                    st.session_state.basic_slice_fine = _stres
-                else:
-                    st.session_state.basic_slice_coarse = _stres
-                slog(f"Slice Thickness ({_st_mode_key}): {_stres['slice_mm']:.2f} mm", "ok")
+    # ================= RUN =================
+    _sterr = None
+    _stres = None
 
+    if st.button("▶ Run Slice Thickness", use_container_width=True, key="btn_slice"):
+        with st.spinner("Computing profile…"):
+            _stres, _sterr = run_slice_thickness_qc(
+                hu_current,
+                px_current,
+                _st_nom_input,
+                mode=_st_mode_key,
+                offset_x=offset_x,
+                offset_y=offset_y,
+            )
+
+    # ================= RESULT =================
+    if _sterr:
+        st.markdown(f'<div class="warnbox">{_sterr}</div>', unsafe_allow_html=True)
+
+    elif _stres is not None:
+        if _st_mode_key == "fine":
+            st.session_state.basic_slice_fine = _stres
+        else:
+            st.session_state.basic_slice_coarse = _stres
+
+        slog(f"Slice Thickness ({_st_mode_key}): {_stres['slice_mm']:.2f} mm", "ok")
     # =========================
     # Fine Result
     # =========================
     if st.session_state.get("basic_slice_fine"):
         st.markdown("### 🔵 Fine Ramp Result")
-
         _sr = st.session_state.basic_slice_fine
 
-        st.pyplot(_sr["fig"])
-        plt.close(_sr["fig"])
+        if "fine_zoom" not in st.session_state:
+            st.session_state["fine_zoom"] = 1.0
+
+        def _reset_fine():
+            st.session_state["fine_zoom"] = 1.0
+
+        _fc1, _fc2 = st.columns([3, 1])
+        with _fc1:
+            _fine_zoom = st.number_input(
+                "🔍 Zoom", min_value=1.0, max_value=8.0,
+                step=0.5, key="fine_zoom")
+        with _fc2:
+            st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
+            st.button("🔄 Reset Zoom", key="fine_reset",
+                      on_click=_reset_fine,
+                      use_container_width=True)
+
+        _img = _sr["img_arr"]
+        _ih, _iw = _img.shape[:2]
+
+        _gray  = np.mean(_img, axis=(0, 2))
+        _split = int(np.argmin(_gray[_iw//4 : 3*_iw//4]) + _iw//4)
+
+        _img_left  = _img[:, :_split]
+        _img_right = _img[:, _split:]
+
+        _ih_l, _iw_l = _img_left.shape[:2]
+        _cx_l = _iw_l / 2.0
+        _cy_l = _ih_l / 2.0
+        _hw_l = _cx_l / _fine_zoom
+        _hh_l = _cy_l / _fine_zoom
+
+        dark_style()
+        _fig_f, (_ax_l, _ax_r) = plt.subplots(
+            1, 2, figsize=(8, 4), facecolor=DARK,
+            gridspec_kw={"width_ratios": [_split, _iw - _split]}
+        )
+        _ax_l.imshow(_img_left)
+        _ax_l.set_xlim(_cx_l - _hw_l, _cx_l + _hw_l)
+        _ax_l.set_ylim(_cy_l + _hh_l, _cy_l - _hh_l)
+        _ax_l.axis("off")
+        _ax_l.set_title("Profile Line", fontsize=8, color=MUTED)
+
+        _ax_r.imshow(_img_right)
+        _ax_r.axis("off")
+        _ax_r.set_title("HU Profile", fontsize=8, color=MUTED)
+
+        plt.tight_layout(pad=0.1)
+        st.image(fig2img(_fig_f), use_container_width=True)
+        plt.close(_fig_f)
 
         _sm   = _sr["slice_mm"]
         _sp   = _sr["pass"]
@@ -4902,25 +5012,103 @@ if _page == "basicqc":
             <div class="metric-lbl">Beads</div>
         </div>
         <div class="metric-item">
-            <div class="metric-val">{_sr["fwhm_mm"]:.2f}</div>
-            <div class="metric-lbl">FWHM</div>
+            <div class="metric-val">{_sr["slice_mm"]:.2f}</div>
+            <div class="metric-lbl">Slice Thickness</div>
         </div>
         </div>
         <div>Fine {_sbadge}</div>
         """, unsafe_allow_html=True)
-
 
     # =========================
     # Coarse Result
     # =========================
     if st.session_state.get("basic_slice_coarse"):
         st.markdown("### 🟠 Coarse Ramp Result")
-
         _sr = st.session_state.basic_slice_coarse
 
-        st.pyplot(_sr["fig"])
-        plt.close(_sr["fig"])
+        KEY = "coarse"
 
+        # -------------------------
+        # state init
+        # -------------------------
+        if f"{KEY}_zoom_value" not in st.session_state:
+            st.session_state[f"{KEY}_zoom_value"] = 1.0
+
+        if f"{KEY}_zoom_version" not in st.session_state:
+            st.session_state[f"{KEY}_zoom_version"] = 0
+
+        # current widget key (เปลี่ยนเมื่อ reset)
+        zoom_widget_key = f"{KEY}_zoom_widget_{st.session_state[f'{KEY}_zoom_version']}"
+
+        # -------------------------
+        # reset callback
+        # -------------------------
+        def reset_coarse_zoom():
+            st.session_state[f"{KEY}_zoom_value"] = 1.0
+            st.session_state[f"{KEY}_zoom_version"] += 1
+
+        # -------------------------
+        # widget
+        # -------------------------
+        _coarse_zoom = st.number_input(
+            "🔍 Zoom",
+            min_value=1.0,
+            max_value=8.0,
+            value=float(st.session_state[f"{KEY}_zoom_value"]),
+            step=0.5,
+            key=zoom_widget_key,
+        )
+
+        # เก็บค่าปัจจุบันไว้ใช้งาน
+        st.session_state[f"{KEY}_zoom_value"] = _coarse_zoom
+        zoom_val = _coarse_zoom
+
+        # -------------------------
+        # reset button
+        # -------------------------
+        st.button(
+            "🔄 Reset Zoom",
+            key=f"{KEY}_reset_btn",
+            on_click=reset_coarse_zoom,
+        )
+
+        # ================= IMAGE =================
+        _img = _sr["img_arr"]
+        _ih, _iw = _img.shape[:2]
+
+        _gray  = np.mean(_img, axis=(0, 2))
+        _split = int(np.argmin(_gray[_iw//4 : 3*_iw//4]) + _iw//4)
+
+        _img_left  = _img[:, :_split]
+        _img_right = _img[:, _split:]
+
+        _ih_l, _iw_l = _img_left.shape[:2]
+        _cx_l = _iw_l / 2.0
+        _cy_l = _ih_l / 2.0
+        _hw_l = _cx_l / zoom_val
+        _hh_l = _cy_l / zoom_val
+
+        dark_style()
+        _fig_c, (_ax_l, _ax_r) = plt.subplots(
+            1, 2, figsize=(8, 4), facecolor=DARK,
+            gridspec_kw={"width_ratios": [_split, _iw - _split]}
+        )
+
+        _ax_l.imshow(_img_left)
+        _ax_l.set_xlim(_cx_l - _hw_l, _cx_l + _hw_l)
+        _ax_l.set_ylim(_cy_l + _hh_l, _cy_l - _hh_l)
+        _ax_l.axis("off")
+        _ax_l.set_title("Profile Line", fontsize=8, color=MUTED)
+
+        _ax_r.imshow(_img_right)
+        _ax_r.axis("off")
+        _ax_r.set_title("HU Profile", fontsize=8, color=MUTED)
+
+        plt.tight_layout(pad=0.1)
+        st.image(fig2img(_fig_c), use_container_width=True)
+        plt.close(_fig_c)
+
+        # ================= METRIC =================
         _sm   = _sr["slice_mm"]
         _sp   = _sr["pass"]
         _scol = "#70ffc0" if _sp else "#ff8a80"
@@ -4959,7 +5147,9 @@ if _page == "basicqc":
     _uni_ok  = (st.session_state.get("basic_accuracy_result") or {}).get("uni_pass", False)
     _fine_ok   = (st.session_state.get("basic_slice_fine")   or {}).get("pass", False)
     _coarse_ok = (st.session_state.get("basic_slice_coarse") or {}).get("pass", False)
-
+    _lc_ok   = st.session_state.get("lc_detect_v2", False)
+    _has_lc  = st.session_state.get("lc_detect_v2", False) or \
+                st.session_state.get("lc_not_detect_v2", False)
     _has_fine   = st.session_state.get("basic_slice_fine")   is not None
     _has_coarse = st.session_state.get("basic_slice_coarse") is not None
 
@@ -4977,7 +5167,7 @@ if _page == "basicqc":
         if not has: return "⚪"
         return "🟢" if ok else "🔴"
 
-    _any_done = any([_has_geo, _has_sq, _has_lin, _has_acc, _has_nz, _has_st])
+    _any_done = any([_has_geo, _has_sq, _has_lin, _has_acc, _has_nz, _has_st, _has_lc])
     if _any_done:
         _nz_pass_flag = (st.session_state.get("basic_noise_result") or {}).get("pass")
         _nz_disp_ok   = _nz_pass_flag is True or _nz_pass_flag is None
@@ -4993,13 +5183,14 @@ if _page == "basicqc":
             <span>{_icon(_has_acc,_uni_ok)} Uniformity</span>
             <span>{_icon(_has_nz,_nz_disp_ok)} Noise QC</span>
             <span>{_icon(_has_st,_st_ok)} Slice Thickness</span>
+            <span>{_icon(_has_lc,_lc_ok)} Low Contrast</span>
           </div>
         </div>""", unsafe_allow_html=True)
 
-        _all_done = all([_has_geo, _has_sq, _has_lin, _has_acc, _has_nz, _has_st])
+        _all_done = all([_has_geo, _has_sq, _has_lin, _has_acc, _has_nz, _has_st, _has_lc])
         if _all_done:
             _nz_real_pass = (st.session_state.get("basic_noise_result") or {}).get("pass")
-            _all_ok = all([_geo_ok, _sq_ok, _lin_ok, _acc_ok, _uni_ok, _st_ok,
+            _all_ok = all([_geo_ok, _sq_ok, _lin_ok, _acc_ok, _uni_ok, _st_ok, _lc_ok,
                            (_nz_real_pass is True or _nz_real_pass is None)])
             if _all_ok:
                 st.markdown('<div class="okbox" style="font-size:13px;font-weight:700;">🟢 ALL BASIC QC TESTS PASSED</div>', unsafe_allow_html=True)
@@ -5007,191 +5198,249 @@ if _page == "basicqc":
                 st.markdown('<div class="warnbox" style="font-size:13px;font-weight:700;">🔴 SOME TESTS FAILED — ตรวจสอบผลลัพธ์ด้านบน</div>', unsafe_allow_html=True)
    
 def reset_spatial_state():
-    keys = [
-        "spatial_slices",
-        "spatial_img",
-        "spatial_px",
-        "profiles",
-        "spatial_fig",
-        "spatial_lines",
-        "spatial_slice_idx",
-        "spatial_wl_main",
-        "spatial_ww_main"
-    ]
-    for k in keys:
-        if k in st.session_state:
-            del st.session_state[k]   
+    for _k in ["spatial_slices", "spatial_img", "spatial_px",
+               "spatial_profiles", "spatial_groups", "spatial_line_coords",
+               "spatial_last_upload"]:
+        st.session_state[_k] = None
+    # clear ผลการวิเคราะห์เก่าด้วย
+    for _k in ["sr_detect_v2", "sr_not_detect_v2", "sr_pass", "sr_has"]:
+        if _k in st.session_state:
+            del st.session_state[_k] 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PASTE THIS BLOCK to replace the entire ⑦ Low Contrast Resolution section
+# Replace from the comment below through to (NOT including):
+#   st.markdown("### 📂 Spatial Resolution Input (DICOM Series)")
+# ═══════════════════════════════════════════════════════════════════════════
 
 # ─────────────────────────
-# ⑦ Low Contrast Resolution
+# ⑦ Low Contrast Resolution  (uses already-loaded slices — no separate upload)
 # ─────────────────────────
 
 st.markdown("---")
 st.markdown("""
 <div class="qc-card">
-  <div class="qc-title">⑦ Low Contrast Resolution</div>
+  <div class="tool-card-accent accent-green" style="border-radius:10px 10px 0 0;height:3px;"></div>
+  <div class="qc-title" style="margin-top:8px;">⑦ Low Contrast Resolution</div>
   <div class="qc-desc">
-    Detect ≤5 mm object at 0.5% contrast level
+    IAEA STANDARD · DETECT ≤5 mm OBJECT @ 0.5% CONTRAST · VISUAL ASSESSMENT
   </div>
-</div>""", unsafe_allow_html=True)
+</div>
+""", unsafe_allow_html=True)
 
-import pydicom as _pydc
+# ── Use the SAME slice already selected in Basic QC (no separate upload needed) ──
+_lc_sl   = st.session_state.slices[_basic_slice_sel]
+_lc_hu   = _lc_sl.get("hu_mod") if _lc_sl.get("hu_mod") is not None else _lc_sl["hu_orig"]
+_lc_px   = _lc_sl["pixel_spacing"]
+_lc_h, _lc_w = _lc_hu.shape
 
-# ===== Load button =====
-if st.button("▶ Load Low Contrast DICOMs", use_container_width=True, key="btn_lc_load"):
+st.markdown(
+    f'<div class="infobox" style="font-size:11px;margin-bottom:10px;">'
+    f'📋 Slice <b>{_basic_slice_sel + 1}</b> — <b>{_lc_sl["name"]}</b>'
+    f' &nbsp;|&nbsp; ps={_lc_px:.3f} mm'
+    f' &nbsp;|&nbsp; ใช้ slice slider ด้านบนเพื่อเปลี่ยน slice</div>',
+    unsafe_allow_html=True
+)
 
-    _lc_loaded = []
+# ── Controls row ──
+_lc_c1, _lc_c2, _lc_c3 = st.columns([1, 1, 1])
+with _lc_c1:
+    _lc_wl = st.number_input("WL", min_value=-5000, max_value=5000, 
+                              value=100, step=10, key="lc_wl_v2",
+                              help="Window Level — แนะนำ 0–60 HU สำหรับ low contrast")
+with _lc_c2:
+    _lc_ww = st.number_input("WW", min_value=-5000, max_value=5000, 
+                              value=100, step=100, key="lc_ww_v2",
+                              help="Window Width — แคบ (100–200 HU) เพื่อเพิ่ม contrast")
+with _lc_c3:
+    _lc_zoom = st.number_input("🔍 Zoom", min_value=1.0, max_value=8.0, 
+                                value=1.0, step=0.5, key="lc_zoom_v2")
 
-    for _f in st.session_state.get("lc_files", []):
-        try:
-            _ds = _pydc.dcmread(io.BytesIO(_f.read()), force=True)
+# ── Windowed + zoomed image ──
+_lc_range = float(_lc_ww)
 
-            _arr = _ds.pixel_array.astype(np.float32)
-            _arr = _arr * float(getattr(_ds, "RescaleSlope", 1.0)) + float(
-                getattr(_ds, "RescaleIntercept", 0.0)
-            )
+if _lc_range <= 0:
+    # WW = 0 → binary threshold ที่ WL (ตาม DICOM Standard)
+    _lc_disp = (_lc_hu >= _lc_wl).astype(np.float32)
+else:
+    _lc_lo   = _lc_wl - _lc_range / 2.0
+    _lc_hi   = _lc_wl + _lc_range / 2.0
+    _lc_disp = np.clip(_lc_hu, _lc_lo, _lc_hi)
+    _lc_disp = (_lc_disp - _lc_lo) / _lc_range
 
-            _px_raw = getattr(_ds, "PixelSpacing", [1.0, 1.0])
-            _px = float(_px_raw[0]) if isinstance(_px_raw, (list, tuple)) else float(_px_raw)
+dark_style()
+_fig_lc, _ax_lc = plt.subplots(figsize=(5, 5), facecolor=DARK)
+_ax_lc.imshow(_lc_disp, cmap="gray", vmin=0, vmax=1, interpolation="bilinear")
 
-            _lc_loaded.append({
-                "img": _arr,
-                "z": int(getattr(_ds, "InstanceNumber", 0)),
-                "px": _px,
-            })
+_lc_cx, _lc_cy = _lc_w / 2.0, _lc_h / 2.0
+_lc_hw = (_lc_w / 2.0) / _lc_zoom
+_lc_hh = (_lc_h / 2.0) / _lc_zoom
+_ax_lc.set_xlim(_lc_cx - _lc_hw, _lc_cx + _lc_hw)
+_ax_lc.set_ylim(_lc_cy + _lc_hh, _lc_cy - _lc_hh)
+_ax_lc.set_title(
+    f"Low Contrast  ·  WL {_lc_wl} / WW {_lc_ww}  ·  Zoom {_lc_zoom:.1f}×",
+    fontsize=8, color=MUTED, pad=4
+)
+_ax_lc.axis("off")
+plt.tight_layout(pad=0.2)
+st.image(fig2img(_fig_lc), use_container_width=True)
+plt.close(_fig_lc)
 
-        except Exception:
-            continue
+# ── Visual assessment checkboxes ──
+st.markdown(
+    '<div style="font-size:10px;letter-spacing:2px;color:#3a5060;'
+    'text-transform:uppercase;margin:12px 0 6px;">Visual Assessment</div>',
+    unsafe_allow_html=True
+)
+_lc_choice = st.radio(
+    "Low Contrast Resolution Assessment",
+    options=[
+        "✅  Detected — ≤5 mm object visible at 0.5%  (PASS)",
+        "❌  Not detected — object not visible  (FAIL)"
+    ],
+    horizontal=True,
+    index=None,
+    key="lc_choice_final"
+)
 
-    if _lc_loaded:
-        _lc_loaded.sort(key=lambda x: x["z"])
-        st.session_state.lc_slices = _lc_loaded
-
-        _mid = len(_lc_loaded) // 2
-        st.session_state.lc_img = _lc_loaded[_mid]["img"]
-        st.session_state.lc_px = _lc_loaded[_mid]["px"]
-
-    st.rerun()
-
-
-# ---------- slice selector ----------
-if st.session_state.get("lc_slices"):
-    _slices = st.session_state.lc_slices
-    st.success(f"✅ Loaded {len(_slices)} slices")
-
-    _lc_idx = st.slider(
-        "Select slice",
-        0,
-        len(_slices) - 1,
-        len(_slices) // 2,
-        key="lc_slice_idx",
-    )
-
-    st.session_state.lc_img = _slices[_lc_idx]["img"]
-    st.session_state.lc_px = _slices[_lc_idx]["px"]
-
-
-# ---------- main UI ----------
-if st.session_state.get("lc_img") is not None:
-
-    _img = st.session_state.lc_img
-    _h, _w = _img.shape
-
-    # ===== WL / WW =====
-    _wc1, _wc2 = st.columns(2)
-    with _wc1:
-        _wl = st.slider("WL", -1000, 1000, 40, key="lc_wl")
-    with _wc2:
-        _ww = st.slider("WW", 1, 2000, 200, key="lc_ww")
-
-    def _apply_window(_a, _wl_val, _ww_val):
-        _lo = _wl_val - _ww_val / 2.0
-        _hi = _wl_val + _ww_val / 2.0
-        _a = np.clip(_a, _lo, _hi)
-        return (_a - _lo) / (_hi - _lo + 1e-8)
-
-    _img_disp = _apply_window(_img, _wl, _ww)
-
-    # ===== zoom =====
-    _zoom = st.slider("🔍 Zoom", 1.0, 8.0, 1.0, 0.25, key="lc_zoom")
-
-    # ===== DISPLAY IMAGE (เหมือน Slice Thickness) =====
-    fig_lc, ax_lc = plt.subplots(figsize=(5, 5))
-    ax_lc.imshow(_img_disp, cmap="gray")
-
-    cx, cy = _w / 2, _h / 2
-    half_w = (_w / 2) / _zoom
-    half_h = (_h / 2) / _zoom
-
-    ax_lc.set_xlim(cx - half_w, cx + half_w)
-    ax_lc.set_ylim(cy + half_h, cy - half_h)
-
-    ax_lc.set_title("Low Contrast Slice")
-    ax_lc.axis("off")
-
-    st.pyplot(fig_lc)
-    plt.close(fig_lc)
-
-    # ===== checkbox =====
-    _c1, _c2 = st.columns(2)
-
-    with _c1:
-        _detect = st.checkbox("Detected (≤5 mm @ 0.5%)", key="lc_detect")
-
-    with _c2:
-        _not_detect = st.checkbox("Not detected", key="lc_not_detect")
-
-    # ===== mutual exclusive =====
-    if _detect:
-        st.session_state.lc_not_detect = False
-
-    if _not_detect:
-        st.session_state.lc_detect = False
-
-    # ===== result =====
-    _status_text = ""
-    _qc_status = ""
-    _lamp_color = "#808080"
-
-    if st.session_state.get("lc_detect"):
-        _status_text = "Able to detect a ≤5 mm object at a 0.5% target contrast level."
-        _qc_status = "PASS"
-        _lamp_color = "#00ff00"
-
-    elif st.session_state.get("lc_not_detect"):
-        _status_text = "Unable to detect a ≤5 mm object at a 0.5% target contrast level."
-        _qc_status = "FAIL"
-        _lamp_color = "#ff0000"
-
-    st.markdown("---")
-
-    if _status_text:
-        st.markdown(f"""
-        <div style="padding:10px; border-radius:8px; background:#111;">
-            <div style="color:#ddd;">{_status_text}</div>
-            <div style="margin-top:8px; font-weight:bold; color:{_lamp_color};">
-                QC Status: {_qc_status}
-            </div>
+if _lc_choice == "✅  Detected — ≤5 mm object visible at 0.5%  (PASS)":
+    st.markdown("""
+    <div class="okbox" style="display:flex;align-items:center;gap:12px;
+      padding:12px 18px;margin-top:8px;">
+      <span style="font-size:26px;line-height:1;">🟢</span>
+      <div>
+        <div style="font-weight:700;font-size:13px;color:#70ffc0;">
+          PASS — Low Contrast Resolution
         </div>
-        """, unsafe_allow_html=True)
+        <div style="font-size:10px;color:#50e090;margin-top:3px;">
+          Able to detect a ≤5 mm object at 0.5% target contrast level
+        </div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+    st.session_state["lc_detect_v2"]     = True
+    st.session_state["lc_not_detect_v2"] = False
 
-    # ===== lamp =====
-    st.markdown(f"""
-    <div style="
-        width:22px;
-        height:22px;
-        border-radius:50%;
-        background:{_lamp_color};
-        border:1px solid #333;">
-    </div>
-    """, unsafe_allow_html=True)
+elif _lc_choice == "❌  Not detected — object not visible  (FAIL)":
+    st.markdown("""
+    <div class="warnbox" style="display:flex;align-items:center;gap:12px;
+      padding:12px 18px;margin-top:8px;">
+      <span style="font-size:26px;line-height:1;">🔴</span>
+      <div>
+        <div style="font-weight:700;font-size:13px;color:#ff8a80;">
+          FAIL — Low Contrast Resolution
+        </div>
+        <div style="font-size:10px;color:#f5c060;margin-top:3px;">
+          Unable to detect a ≤5 mm object at 0.5% target contrast level
+        </div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+    st.session_state["lc_detect_v2"]     = False
+    st.session_state["lc_not_detect_v2"] = True
 
 else:
-    st.info("อัปโหลด DICOM series สำหรับ Low Contrast ก่อน")
+    st.markdown("""
+    <div style="background:#0a0f18;border:1px dashed #1e2a3a;border-radius:8px;
+      padding:12px 18px;font-size:11px;color:#3a5060;
+      text-align:center;margin-top:8px;">
+      ⚪ &nbsp; Select assessment result to record
+    </div>""", unsafe_allow_html=True)
+    st.session_state["lc_detect_v2"]     = False
+    st.session_state["lc_not_detect_v2"] = False
+
+st.markdown("""
+<div class="mathbox" style="margin-top:10px;">
+  <b>IAEA — Low Contrast Criterion:</b><br>
+  The 0.5% contrast section should resolve objects ≤5 mm in diameter.<br>
+  <span style="color:#3a7090;">
+    Tip: Use WL ≈ 0–60 HU, WW ≈ 100–150 HU and Zoom for better visibility
+  </span>
+</div>""", unsafe_allow_html=True)
+
+# ── Basic QC Summary (แสดงหลัง Low Contrast) ──
+st.markdown("---")
+_geo_ok  = (st.session_state.get("basic_geometry_result") or {}).get("pass", False)
+_sq_ok   = (st.session_state.get("basic_square_result")  or {}).get("pass", False)
+_lin_ok  = (st.session_state.get("basic_linearity_result") or {}).get("pass", False)
+_acc_ok  = (st.session_state.get("basic_accuracy_result") or {}).get("acc_pass", False)
+_uni_ok  = (st.session_state.get("basic_accuracy_result") or {}).get("uni_pass", False)
+_fine_ok   = (st.session_state.get("basic_slice_fine")   or {}).get("pass", False)
+_coarse_ok = (st.session_state.get("basic_slice_coarse") or {}).get("pass", False)
+_st_ok   = _fine_ok and _coarse_ok
+_lc_ok   = st.session_state.get("lc_detect_v2", False)
+_sr_ok   = st.session_state.get("sr_pass", False)
+
+_has_geo    = st.session_state.get("basic_geometry_result")   is not None
+_has_sq     = st.session_state.get("basic_square_result")     is not None
+_has_lin    = st.session_state.get("basic_linearity_result")  is not None
+_has_acc    = st.session_state.get("basic_accuracy_result")   is not None
+_has_nz     = st.session_state.get("basic_noise_result")      is not None
+_has_st     = st.session_state.get("basic_slice_fine") is not None or \
+              st.session_state.get("basic_slice_coarse") is not None
+_has_lc     = st.session_state.get("lc_detect_v2", False) or \
+              st.session_state.get("lc_not_detect_v2", False)
+_has_sr     = st.session_state.get("sr_has", False)
+
+def _icon(has, ok):
+    if not has: return "⚪"
+    return "🟢" if ok else "🔴"
+
+_nz_pass_flag = (st.session_state.get("basic_noise_result") or {}).get("pass")
+_nz_disp_ok   = _nz_pass_flag is True or _nz_pass_flag is None
+
+st.markdown(f"""
+<div class="qc-card" style="margin-top:4px;">
+  <div class="qc-title" style="font-size:13px;">📋 Basic QC Summary</div>
+  <div style="display:flex;flex-wrap:wrap;gap:18px;margin-top:10px;
+    font-size:12px;color:#d8e8ff;">
+    <span>{_icon(_has_geo,_geo_ok)} Geometry QC</span>
+    <span>{_icon(_has_sq,_sq_ok)} Square 50mm</span>
+    <span>{_icon(_has_lin,_lin_ok)} CT Linearity</span>
+    <span>{_icon(_has_acc,_acc_ok)} CT Accuracy</span>
+    <span>{_icon(_has_acc,_uni_ok)} Uniformity</span>
+    <span>{_icon(_has_nz,_nz_disp_ok)} Noise QC</span>
+    <span>{_icon(_has_st,_st_ok)} Slice Thickness</span>
+    <span>{_icon(_has_lc,_lc_ok)} Low Contrast</span>
+    <span>{_icon(_has_sr,_sr_ok)} Spatial Resolution</span>
+  </div>
+</div>""", unsafe_allow_html=True)
 
 # ─────────────────────────
 # Spatial Resolution (MTF)
 # ─────────────────────────
+# ── UI header ──
+st.markdown("""
+    <div class="qc-card">
+      <div class="qc-title">⑦ Spatial Resolution (MTF)</div>
+      <div class="qc-desc">
+            IAEA HUMAN HEALTH SERIES No.19 · CTP528 MODULE · ACCEPTANCE CRITERION &gt; 5 lp/cm
+          </div>
+    </div>""", unsafe_allow_html=True)
+
+if st.session_state.get("sr_computed"):
+
+        _lp_val  = st.session_state.get("sr_last_lp", 0)
+        _mtf_val = st.session_state.get("sr_last_mtf", 0)
+
+        st.markdown(f"""
+        <div class="infobox" style="font-size:11px;margin-bottom:10px;">
+          Last computed: &nbsp;
+          <b>{_lp_val} lp/cm</b> &nbsp;|&nbsp;
+          MTF (Michelson) = <b>{_mtf_val:.3f}</b> &nbsp;|&nbsp;
+          Criterion: resolve <b>&gt; 5 lp/cm</b> visually
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="mathbox" style="margin-bottom:10px;">
+          <b>IAEA Protocol — Step-by-step:</b><br>
+          1. Load the Catphan CTP528 slice (high-contrast resolution module)<br>
+          2. Adjust WL/WW to clearly visualise the line pair groups<br>
+          3. Click <b>Detect Line Pairs</b> to auto-locate LP groups<br>
+          4. Select the highest lp/cm group still visually resolvable<br>
+          5. Click <b>Compute MTF</b> to calculate Michelson contrast<br>
+          6. Mark <b>Resolved</b> if the line pairs are clearly separated<br>
+          7. <b>Pass criterion:</b> able to resolve &gt; 5 lp/cm (IAEA HHS No.19 §4.3)
+        </div>""", unsafe_allow_html=True)
+
 st.markdown("### 📂 Spatial Resolution Input (DICOM Series)")
 
 # ── init session keys ──
@@ -5201,11 +5450,17 @@ for _k in ["spatial_slices", "spatial_img", "spatial_px",
     if _k not in st.session_state:
         st.session_state[_k] = None
 
+# key counter สำหรับ reset uploader
+if "spatial_uploader_key" not in st.session_state:
+    st.session_state.spatial_uploader_key = 0
+
 def reset_spatial_state():
     for _k in ["spatial_slices", "spatial_img", "spatial_px",
                "spatial_profiles", "spatial_groups", "spatial_line_coords",
                "spatial_last_upload"]:
         st.session_state[_k] = None
+    # เพิ่ม counter → uploader จะ clear ตัวเอง
+    st.session_state.spatial_uploader_key += 1
 
 # ── Upload + Reset ──
 _sp_up_col, _sp_rst_col = st.columns([4, 1])
@@ -5213,7 +5468,8 @@ with _sp_up_col:
     files = st.file_uploader(
         "Upload DICOM folder (multiple files)",
         type=None, accept_multiple_files=True,
-        key="spatial_folder", label_visibility="collapsed")
+        key=f"spatial_folder_{st.session_state.spatial_uploader_key}",
+        label_visibility="collapsed")
 with _sp_rst_col:
     st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
     if st.button("🔄 Reset", use_container_width=True, key="sp_reset"):
@@ -5224,7 +5480,7 @@ with _sp_rst_col:
 if files:
     file_names = sorted(f.name for f in files)
     if st.session_state.spatial_last_upload != file_names:
-        reset_spatial_state()
+        reset_spatial_state()  # ← clear ทุกอย่างก่อน
         st.session_state.spatial_last_upload = file_names
         _sp_loaded = []
         for _f in files:
@@ -5244,8 +5500,9 @@ if files:
         if _sp_loaded:
             _sp_loaded.sort(key=lambda x: x["z"])
             st.session_state.spatial_slices = _sp_loaded
-            st.session_state.spatial_img = _sp_loaded[len(_sp_loaded) // 2]["img"]
-            st.session_state.spatial_px  = _sp_loaded[len(_sp_loaded) // 2]["px"]
+            _default = min(97, len(_sp_loaded) - 1)
+            st.session_state.spatial_img = _sp_loaded[_default]["img"]
+            st.session_state.spatial_px  = _sp_loaded[_default]["px"]
         st.rerun()
 
 # ── Slice selector ──
@@ -5253,7 +5510,7 @@ if st.session_state.spatial_slices:
     _slices = st.session_state.spatial_slices
     st.success(f"✅ Loaded {len(_slices)} slices")
     _sp_idx = st.slider("Select slice", 0, len(_slices) - 1,
-                        len(_slices) // 2, key="spatial_slice_idx")
+                    min(170, len(_slices) - 1), key="spatial_slice_idx")
     st.session_state.spatial_img = _slices[_sp_idx]["img"]
     st.session_state.spatial_px  = _slices[_sp_idx]["px"]
 
@@ -5262,26 +5519,22 @@ if st.session_state.spatial_img is not None:
     img = st.session_state.spatial_img
     h, w = img.shape
 
-    # ── WL/WW ──
-    _wc1, _wc2 = st.columns(2)
+    # ── Controls row ──
+    _wc1, _wc2, = st.columns([1, 1])
     with _wc1:
-        wl = st.slider("WL", -1000, 1000, 500, key="spatial_wl_main")
+        wl = st.number_input("WL", min_value=-5000, max_value=5000, 
+                                value=500, step=10, key="wl_v2")                           
     with _wc2:
-        ww = st.slider("WW", 1, 2000, 1000, key="spatial_ww_main")
+        ww = st.number_input("WW", min_value=-5000, max_value=5000, 
+                                value=2000, step=10, key="ww_v2")
 
     img_disp = np.clip((img - (wl - ww / 2)) / (ww + 1e-8), 0, 1)
-
-    # ── UI header ──
-    st.markdown("""
-    <div class="qc-card">
-      <div class="qc-title">⑦ Spatial Resolution (MTF)</div>
-      <div class="qc-desc">LINE PAIR METHOD · Michelson Contrast · FFT-based MTF</div>
-    </div>""", unsafe_allow_html=True)
 
     # ── Controls row ──
     _cc1, _cc2 = st.columns([1, 1])
     with _cc1:
-        zoom = st.slider("🔍 Zoom", 1.0, 8.0, 1.0, 0.25, key="spatial_zoom")
+        zoom = st.number_input("🔍 Zoom", min_value=1.0, max_value=8.0, 
+                                    value=1.0, step=0.5, key="spatial_zoom")
     with _cc2:
         show_lines = st.checkbox("👁 แสดงเส้น sampling", value=True, key="spatial_show_lines")
 
@@ -5333,117 +5586,114 @@ if st.session_state.spatial_img is not None:
     plt.tight_layout(pad=0.2)
     st.image(fig2img(_fig_prev), use_container_width=True)
     plt.close(_fig_prev)
-
+    
     if st.button("▶ Detect Line Pairs", use_container_width=True, key="sp_detect"):
-            from scipy.ndimage import map_coordinates as _map_coords
+        from scipy.ndimage import map_coordinates as _map_coords
 
-            _yy, _xx = np.ogrid[:h, :w]
-            _rr = np.sqrt((_xx - w/2)**2 + (_yy - h/2)**2)
-            _r_min = 0.18 * min(h, w)
-            _r_max = 0.46 * min(h, w)
-            _ann   = (_rr >= _r_min) & (_rr <= _r_max)
+        _yy, _xx = np.ogrid[:h, :w]
+        _rr = np.sqrt((_xx - w/2)**2 + (_yy - h/2)**2)
+        _r_min = 0.18 * min(h, w)
+        _r_max = 0.46 * min(h, w)
+        _ann   = (_rr >= _r_min) & (_rr <= _r_max)
 
-            _vals = img_disp[_ann]
-            if _vals.size == 0:
-                st.error("❌ ไม่พบ LP annulus")
+        _vals = img_disp[_ann]
+        if _vals.size == 0:
+            st.error("❌ ไม่พบ LP annulus")
+        else:
+            _thr = np.mean(_vals) + 2.0 * np.std(_vals)
+            _bw  = (img_disp >= _thr) & _ann
+            _bw8 = (_bw.astype(np.uint8) * 255)
+            _k3  = np.ones((3, 3), np.uint8)
+            _bw8 = cv2.morphologyEx(_bw8, cv2.MORPH_OPEN,  _k3)
+            _bw8 = cv2.morphologyEx(_bw8, cv2.MORPH_CLOSE, _k3)
+
+            _nlab, _lab, _stats, _cents = cv2.connectedComponentsWithStats(_bw8, connectivity=8)
+
+            _cands = []
+            for _ii in range(1, _nlab):
+                _area = _stats[_ii, cv2.CC_STAT_AREA]
+                if _area < 8 or _area > 400:
+                    continue
+                _cx_i, _cy_i = _cents[_ii]
+                _r_i   = float(np.sqrt((_cx_i - w/2)**2 + (_cy_i - h/2)**2))
+                _ang_i = float(np.arctan2(_cy_i - h/2, _cx_i - w/2))
+                _ys_i, _xs_i = np.where(_lab == _ii)
+                if len(_xs_i) < 6:
+                    continue
+                _pts_i = np.column_stack([_xs_i, _ys_i]).astype(np.float32)
+                _cov_i = np.cov((_pts_i - _pts_i.mean(0)).T)
+                if _cov_i.shape != (2, 2):
+                    continue
+                _ev, _evec = np.linalg.eigh(_cov_i)
+                _maj = _evec[:, np.argmax(_ev)]
+                _vx_i, _vy_i = float(_maj[0]), float(_maj[1])
+                _nn_i = np.hypot(_vx_i, _vy_i) + 1e-8
+                _cands.append({"cx": _cx_i, "cy": _cy_i, "r": _r_i, "ang": _ang_i,
+                               "vx": _vx_i / _nn_i, "vy": _vy_i / _nn_i})
+
+            if len(_cands) < 4:
+                st.error(f"❌ detect ได้แค่ {len(_cands)} candidates — ปรับ WL/WW")
             else:
-                _thr = np.mean(_vals) + 2.0 * np.std(_vals)
-                _bw  = (img_disp >= _thr) & _ann
-                _bw8 = (_bw.astype(np.uint8) * 255)
-                _k3  = np.ones((3, 3), np.uint8)
-                _bw8 = cv2.morphologyEx(_bw8, cv2.MORPH_OPEN,  _k3)
-                _bw8 = cv2.morphologyEx(_bw8, cv2.MORPH_CLOSE, _k3)
+                _r_med = float(np.median([c["r"] for c in _cands]))
+                _r_tol = max(15, 0.10 * _r_med)
+                _ring  = sorted([c for c in _cands if abs(c["r"] - _r_med) <= _r_tol],
+                                key=lambda c: c["ang"])
 
-                _nlab, _lab, _stats, _cents = cv2.connectedComponentsWithStats(_bw8, connectivity=8)
+                _groups = []
+                _used   = [False] * len(_ring)
+                for _ii in range(len(_ring)):
+                    if _used[_ii]: continue
+                    _grp = [_ring[_ii]]; _used[_ii] = True
+                    for _jj in range(_ii + 1, len(_ring)):
+                        if _used[_jj]: continue
+                        _da = abs(np.angle(np.exp(1j * (_ring[_jj]["ang"] - _ring[_ii]["ang"]))))
+                        _dd = np.hypot(_ring[_jj]["cx"] - _ring[_ii]["cx"],
+                                       _ring[_jj]["cy"] - _ring[_ii]["cy"])
+                        if _da < np.deg2rad(14) and _dd < 32:
+                            _grp.append(_ring[_jj]); _used[_jj] = True
+                    _cxg = float(np.mean([z["cx"] for z in _grp]))
+                    _cyg = float(np.mean([z["cy"] for z in _grp]))
+                    _angs_g = np.array([z["ang"] for z in _grp])
+                    _angg = float(np.angle(np.mean(np.exp(1j * _angs_g))))
+                    _vxg = float(np.mean([z["vx"] for z in _grp]))
+                    _vyg = float(np.mean([z["vy"] for z in _grp]))
+                    _nv  = np.hypot(_vxg, _vyg) + 1e-8
+                    _groups.append({"cx": _cxg, "cy": _cyg,
+                                    "r": float(np.mean([z["r"] for z in _grp])),
+                                    "ang": _angg,
+                                    "vx": _vxg / _nv, "vy": _vyg / _nv})
+                _groups.sort(key=lambda g: g["ang"])
 
-                _cands = []
-                for _ii in range(1, _nlab):
-                    _area = _stats[_ii, cv2.CC_STAT_AREA]
-                    if _area < 8 or _area > 400:
-                        continue
-                    _cx_i, _cy_i = _cents[_ii]
-                    _r_i   = float(np.sqrt((_cx_i - w/2)**2 + (_cy_i - h/2)**2))
-                    _ang_i = float(np.arctan2(_cy_i - h/2, _cx_i - w/2))
-                    _ys_i, _xs_i = np.where(_lab == _ii)
-                    if len(_xs_i) < 6:
-                        continue
-                    _pts_i = np.column_stack([_xs_i, _ys_i]).astype(np.float32)
-                    _cov_i = np.cov((_pts_i - _pts_i.mean(0)).T)
-                    if _cov_i.shape != (2, 2):
-                        continue
-                    _ev, _evec = np.linalg.eigh(_cov_i)
-                    _maj = _evec[:, np.argmax(_ev)]
-                    _vx_i, _vy_i = float(_maj[0]), float(_maj[1])
-                    _nn_i = np.hypot(_vx_i, _vy_i) + 1e-8
-                    _cands.append({"cx": _cx_i, "cy": _cy_i, "r": _r_i, "ang": _ang_i,
-                                   "vx": _vx_i / _nn_i, "vy": _vy_i / _nn_i})
+                _profs       = []
+                _line_coords = []
+                _slen = 18; _ostep = 3; _nsamp = 90
+                for _gi, _g in enumerate(_groups[:12]):
+                    _gx, _gy  = _g["cx"], _g["cy"]
+                    _ang_g    = _g["ang"]
+                    _radial_x =  float(np.cos(_ang_g))
+                    _radial_y =  float(np.sin(_ang_g))
+                    _tang_x   = -_radial_y
+                    _tang_y   =  _radial_x
+                    _nx, _ny  = _tang_x, _tang_y
+                    _tx, _ty  = _radial_x, _radial_y
+                    for _k in (-1, 0, 1):
+                        _t  = np.linspace(-_slen, _slen, _nsamp)
+                        _xl = _gx + _t * _nx + _k * _ostep * _tx
+                        _yl = _gy + _t * _ny + _k * _ostep * _ty
+                        _vd = (_xl >= 0) & (_xl <= w-1) & (_yl >= 0) & (_yl <= h-1)
+                        _xl, _yl = _xl[_vd], _yl[_vd]
+                        if len(_xl) < 15: continue
+                        _vp = _map_coords(img, [_yl, _xl], order=1, mode="nearest")
+                        _vp = (_vp - _vp.min()) / (_vp.max() - _vp.min() + 1e-8)
+                        _profs.append(_vp)
+                        _line_coords.append((_xl, _yl, _gi))
 
-                if len(_cands) < 4:
-                    st.error(f"❌ detect ได้แค่ {len(_cands)} candidates — ปรับ WL/WW")
-                else:
-                    _r_med = float(np.median([c["r"] for c in _cands]))
-                    _r_tol = max(15, 0.10 * _r_med)
-                    _ring  = sorted([c for c in _cands if abs(c["r"] - _r_med) <= _r_tol],
-                                    key=lambda c: c["ang"])
+                st.session_state.spatial_groups      = _groups
+                st.session_state.spatial_profiles    = _profs
+                st.session_state.spatial_line_coords = _line_coords
+                st.success(f"✅ Detected {len(_groups)} LP groups, {len(_profs)} profiles")
+                st.rerun()
 
-                    # group nearby candidates
-                    _groups = []
-                    _used   = [False] * len(_ring)
-                    for _ii in range(len(_ring)):
-                        if _used[_ii]: continue
-                        _grp = [_ring[_ii]]; _used[_ii] = True
-                        for _jj in range(_ii + 1, len(_ring)):
-                            if _used[_jj]: continue
-                            _da = abs(np.angle(np.exp(1j * (_ring[_jj]["ang"] - _ring[_ii]["ang"]))))
-                            _dd = np.hypot(_ring[_jj]["cx"] - _ring[_ii]["cx"],
-                                           _ring[_jj]["cy"] - _ring[_ii]["cy"])
-                            if _da < np.deg2rad(14) and _dd < 32:
-                                _grp.append(_ring[_jj]); _used[_jj] = True
-                        _cxg = float(np.mean([z["cx"] for z in _grp]))
-                        _cyg = float(np.mean([z["cy"] for z in _grp]))
-                        _angs_g = np.array([z["ang"] for z in _grp])
-                        _angg = float(np.angle(np.mean(np.exp(1j * _angs_g))))
-                        _vxg = float(np.mean([z["vx"] for z in _grp]))
-                        _vyg = float(np.mean([z["vy"] for z in _grp]))
-                        _nv  = np.hypot(_vxg, _vyg) + 1e-8
-                        _groups.append({"cx": _cxg, "cy": _cyg,
-                                        "r": float(np.mean([z["r"] for z in _grp])),
-                                        "ang": _angg,
-                                        "vx": _vxg / _nv, "vy": _vyg / _nv})
-                    _groups.sort(key=lambda g: g["ang"])
-
-                    # extract profiles + store line coords for overlay
-                    _profs       = []
-                    _line_coords = []   # (xs, ys, group_index)
-                    _slen = 18; _ostep = 3; _nsamp = 90
-                    for _gi, _g in enumerate(_groups[:12]):
-                        _gx, _gy  = _g["cx"], _g["cy"]
-                        _ang_g    = _g["ang"]
-                        # LP bars วางตั้งฉากกับรัศมี → sampling ตาม tangent ของ ring
-                        # radial = (cos, sin) ; tangent = (-sin, cos)
-                        _radial_x =  float(np.cos(_ang_g))
-                        _radial_y =  float(np.sin(_ang_g))
-                        _tang_x   = -_radial_y   # tangent (ขนาน LP bar)
-                        _tang_y   =  _radial_x
-                        _nx, _ny  = _tang_x, _tang_y      # along bar
-                        _tx, _ty  = _radial_x, _radial_y  # across bar (offset)
-                        for _k in (-1, 0, 1):
-                            _t  = np.linspace(-_slen, _slen, _nsamp)
-                            _xl = _gx + _t * _nx + _k * _ostep * _tx
-                            _yl = _gy + _t * _ny + _k * _ostep * _ty
-                            _vd = (_xl >= 0) & (_xl <= w-1) & (_yl >= 0) & (_yl <= h-1)
-                            _xl, _yl = _xl[_vd], _yl[_vd]
-                            if len(_xl) < 15: continue
-                            _vp = _map_coords(img, [_yl, _xl], order=1, mode="nearest")
-                            _vp = (_vp - _vp.min()) / (_vp.max() - _vp.min() + 1e-8)
-                            _profs.append(_vp)
-                            _line_coords.append((_xl, _yl, _gi))
-
-                    st.session_state.spatial_groups     = _groups
-                    st.session_state.spatial_profiles   = _profs
-                    st.session_state.spatial_line_coords = _line_coords
-                    st.success(f"✅ Detected {len(_groups)} LP groups, {len(_profs)} profiles — ภาพด้านบนจะอัปเดตทันที")
-                    st.rerun()
     lp_value = st.selectbox(
         "Line Pair (lp/cm)",
         [1,2,3,4,5,6,7,8],
@@ -5457,8 +5707,6 @@ if st.session_state.spatial_img is not None:
         if st.button("▶ Compute MTF", use_container_width=True, key="sp_compute"):
 
             _profs_all = st.session_state.spatial_profiles
-
-            # ===== select group =====
             _idx_s = (lp_value - 1) * 3
             _idx_e = min(lp_value * 3, len(_profs_all))
 
@@ -5472,24 +5720,19 @@ if st.session_state.spatial_img is not None:
                 st.error(f"❌ ไม่พบ profiles ของ {lp_value}")
                 st.stop()
 
-            # ===== average profile =====
             _min_len = min(len(p) for p in _sel)
             _sel_eq = np.asarray([p[:_min_len] for p in _sel], dtype=np.float32)
             _y_avg = np.mean(_sel_eq, axis=0)
 
-            # ===== Michelson MTF =====
             _Imax = float(np.max(_y_avg))
             _Imin = float(np.min(_y_avg))
             _mtf_point = (_Imax - _Imin) / (_Imax + _Imin + 1e-8)
 
-            # ===== pixel size =====
             _px_val = st.session_state.get("spatial_px", 1.0)
             _px = float(_px_val[0]) if isinstance(_px_val, (list, tuple, np.ndarray)) else float(_px_val)
 
-            # ===== FFT =====
             _y_fft = _y_avg.copy()
             _N = len(_y_fft)
-
             _edge = max(5, int(0.1 * _N))
             _bg = (np.mean(_y_fft[:_edge]) + np.mean(_y_fft[-_edge:])) / 2.0
             _y_fft = _y_fft - _bg
@@ -5505,11 +5748,8 @@ if st.session_state.spatial_img is not None:
 
             _mtf_curve = _Y / _Y[0]
             _f_lp_cm = np.arange(_Nfft // 2) / (_Nfft * _px) * 10.0
-
-            # ===== monotonic fix =====
             _mtf_curve = np.maximum.accumulate(_mtf_curve[::-1])[::-1]
 
-            # ===== find MTF50 / 10 =====
             def find_level(level):
                 for i in range(1, len(_mtf_curve)):
                     if _mtf_curve[i] <= level:
@@ -5523,76 +5763,209 @@ if st.session_state.spatial_img is not None:
             _f50 = find_level(0.5)
             _f10 = find_level(0.1)
 
+            # ── บันทึกผลทั้งหมดลง session state ──
+            st.session_state["sr_last_lp"]      = lp_value
+            st.session_state["sr_last_mtf"]     = _mtf_point
+            st.session_state["sr_last_Imax"]    = _Imax
+            st.session_state["sr_last_Imin"]    = _Imin
+            st.session_state["sr_last_mean"]    = float(np.mean(_y_avg))
+            st.session_state["sr_last_f50"]     = _f50
+            st.session_state["sr_last_f10"]     = _f10
+            st.session_state["sr_last_sel_eq"]  = _sel_eq
+            st.session_state["sr_last_y_avg"]   = _y_avg
+            st.session_state["sr_last_f_lp_cm"] = _f_lp_cm
+            st.session_state["sr_last_mtf_curve"] = _mtf_curve
+            st.session_state["sr_computed"]     = True
+
+        # ── แสดงผล (ข้างนอก button block → คงอยู่หลัง rerun) ──
+        if st.session_state.get("sr_computed"):
+
+            _lp_val    = st.session_state["sr_last_lp"]
+            _mtf_val   = st.session_state["sr_last_mtf"]
+            _Imax      = st.session_state["sr_last_Imax"]
+            _Imin      = st.session_state["sr_last_Imin"]
+            _mean_val  = st.session_state["sr_last_mean"]
+            _f50       = st.session_state["sr_last_f50"]
+            _f10       = st.session_state["sr_last_f10"]
+            _sel_eq    = st.session_state["sr_last_sel_eq"]
+            _y_avg     = st.session_state["sr_last_y_avg"]
+            _f_lp_cm   = st.session_state["sr_last_f_lp_cm"]
+            _mtf_curve = st.session_state["sr_last_mtf_curve"]
+
             st.write("MTF50:", _f50)
             st.write("MTF10:", _f10)
 
-            # ===== plots =====
             _c1, _c2 = st.columns(2)
 
-            # ----- profile -----
             with _c1:
                 fig1, ax1 = plt.subplots()
-                # plot individual profiles
                 for _p in _sel_eq:
                     ax1.plot(_p, color="#9aa5b1", alpha=0.4, lw=0.8)
-
-                # plot average
                 ax1.plot(_y_avg, color="#00e5ff", lw=2, label="Mean profile")
-
-                # ===== lines =====
                 ax1.axhline(_Imax, color="#ff5252", lw=1.2, ls="--", label=f"Imax = {_Imax:.3f}")
                 ax1.axhline(_Imin, color="#7b61ff", lw=1.2, ls="--", label=f"Imin = {_Imin:.3f}")
-                # ===== annotation box =====
+                ax1.axhline(_mean_val, color="#ffd54f", lw=1.0, ls=":", label=f"Mean = {_mean_val:.3f}")
                 txt = (
-                    f"LP = {lp_value} lp/cm\n"
-                    f"MTF = {_mtf_point:.3f}\n"
+                    f"LP = {_lp_val} lp/cm\n"
+                    f"MTF = {_mtf_val:.3f}\n"
                     f"Imax = {_Imax:.3f}\n"
                     f"Imin = {_Imin:.3f}"
                 )
-
-                ax1.text(
-                    0.02, 0.95,
-                    txt,
-                    transform=ax1.transAxes,
-                    fontsize=8,
-                    verticalalignment='top',
-                    bbox=dict(facecolor="black", alpha=0.6, edgecolor="none", pad=4)
-                )
-                # optional mean intensity line
-                _mean_val = float(np.mean(_y_avg))
-                ax1.axhline(_mean_val, color="#ffd54f", lw=1.0, ls=":", label=f"Mean = {_mean_val:.3f}")
-                ax1.set_title(f"Profile @ {lp_value} lp/cm")
-                ax1.set_title(f"Profile @ {lp_value} lp/cm")
+                ax1.text(0.02, 0.95, txt, transform=ax1.transAxes, fontsize=8,
+                         verticalalignment='top',
+                         bbox=dict(facecolor="black", alpha=0.6, edgecolor="none", pad=4))
+                ax1.set_title(f"Profile @ {_lp_val} lp/cm")
                 ax1.set_xlabel("Sample")
                 ax1.set_ylabel("Normalized HU")
                 ax1.grid(True, alpha=0.3)
-
                 ax1.legend(fontsize=7)
                 st.pyplot(fig1)
                 plt.close(fig1)
 
-            # ----- MTF curve -----
             with _c2:
                 fig2, ax2 = plt.subplots()
                 ax2.plot(_f_lp_cm, _mtf_curve, lw=2)
                 ax2.axhline(0.5, ls="--")
                 ax2.axhline(0.1, ls="--")
-
                 if not np.isnan(_f50):
                     ax2.axvline(_f50, ls="--", label=f"MTF50={_f50:.2f}")
                 if not np.isnan(_f10):
                     ax2.axvline(_f10, ls="--", label=f"MTF10={_f10:.2f}")
-
                 ax2.set_xlim(0, 12)
                 ax2.set_ylim(0, 1.05)
-                ax2.set_title(f"MTF Curve @ {lp_value} lp/cm")
+                ax2.set_title(f"MTF Curve @ {_lp_val} lp/cm")
                 ax2.legend()
                 ax2.grid()
                 st.pyplot(fig2)
                 plt.close(fig2)
 
-            # ===== metric =====
-            st.metric(f"MTF @ {lp_value} lp/cm", f"{_mtf_point:.3f}") 
+            st.metric(f"MTF @ {_lp_val} lp/cm", f"{_mtf_val:.3f}")
+
+            st.markdown("---")
+
+            # ── Assessment ──
+            _sr_choice = st.radio(
+                "Spatial Resolution Assessment",
+                options=[
+                    "✅  Resolved ≥ 5 lp/cm  (PASS)",
+                    "❌  Not resolved ≥ 5 lp/cm  (FAIL)"
+                ],
+                horizontal=True,
+                index=None,
+                key="sr_choice_final"
+            )
+
+            if _sr_choice == "✅  Resolved ≥ 5 lp/cm  (PASS)":
+                st.markdown(f"""
+                <div class="okbox" style="display:flex;align-items:center;gap:12px;
+                  padding:12px 18px;margin-top:8px;">
+                  <span style="font-size:26px;line-height:1;">🟢</span>
+                  <div>
+                    <div style="font-weight:700;font-size:13px;color:#70ffc0;">
+                      PASS — Spatial Resolution
+                    </div>
+                    <div style="font-size:10px;color:#50e090;margin-top:3px;">
+                      Resolved ≥ 5 lp/cm at <b>{_lp_val} lp/cm</b> —
+                      meets IAEA HHS No.19 criterion
+                    </div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+                st.session_state["sr_pass"] = True
+                st.session_state["sr_has"]  = True
+
+            elif _sr_choice == "❌  Not resolved ≥ 5 lp/cm  (FAIL)":
+                st.markdown(f"""
+                <div class="warnbox" style="display:flex;align-items:center;gap:12px;
+                  padding:12px 18px;margin-top:8px;">
+                  <span style="font-size:26px;line-height:1;">🔴</span>
+                  <div>
+                    <div style="font-weight:700;font-size:13px;color:#ff8a80;">
+                      FAIL — Spatial Resolution
+                    </div>
+                    <div style="font-size:10px;color:#f5c060;margin-top:3px;">
+                      Not resolved ≥ 5 lp/cm at <b>{_lp_val} lp/cm</b> —
+                      does not meet IAEA HHS No.19 criterion
+                    </div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+                st.session_state["sr_pass"] = False
+                st.session_state["sr_has"]  = True
+
+            else:
+                st.markdown("""
+                <div style="background:#0a0f18;border:1px dashed #1e2a3a;
+                  border-radius:8px;padding:12px 18px;font-size:11px;
+                  color:#3a5060;text-align:center;margin-top:8px;">
+                  ⚪ &nbsp; Select assessment result to record
+                </div>""", unsafe_allow_html=True)
+                st.session_state["sr_pass"] = False
+                st.session_state["sr_has"]  = False
+
+    # ── Basic QC Summary ──
+    st.markdown("---")
+    _geo_ok  = (st.session_state.get("basic_geometry_result") or {}).get("pass", False)
+    _sq_ok   = (st.session_state.get("basic_square_result")  or {}).get("pass", False)
+    _lin_ok  = (st.session_state.get("basic_linearity_result") or {}).get("pass", False)
+    _acc_ok  = (st.session_state.get("basic_accuracy_result") or {}).get("acc_pass", False)
+    _uni_ok  = (st.session_state.get("basic_accuracy_result") or {}).get("uni_pass", False)
+    _fine_ok   = (st.session_state.get("basic_slice_fine")   or {}).get("pass", False)
+    _coarse_ok = (st.session_state.get("basic_slice_coarse") or {}).get("pass", False)
+    _st_ok   = _fine_ok and _coarse_ok
+    _lc_ok   = st.session_state.get("lc_detect_v2", False)
+    _sr_ok   = st.session_state.get("sr_pass", False)
+
+    _has_geo = st.session_state.get("basic_geometry_result")  is not None
+    _has_sq  = st.session_state.get("basic_square_result")    is not None
+    _has_lin = st.session_state.get("basic_linearity_result") is not None
+    _has_acc = st.session_state.get("basic_accuracy_result")  is not None
+    _has_nz  = st.session_state.get("basic_noise_result")     is not None
+    _has_st  = (st.session_state.get("basic_slice_fine")   is not None or
+                st.session_state.get("basic_slice_coarse") is not None)
+    _has_lc  = (st.session_state.get("lc_detect_v2",     False) or
+                st.session_state.get("lc_not_detect_v2", False))
+    _has_sr  = st.session_state.get("sr_has", False)
+
+    def _icon(has, ok):
+        if not has: return "⚪"
+        return "🟢" if ok else "🔴"
+
+    _nz_pass_flag = (st.session_state.get("basic_noise_result") or {}).get("pass")
+    _nz_disp_ok   = _nz_pass_flag is True or _nz_pass_flag is None
+
+    st.markdown(f"""
+    <div class="qc-card" style="margin-top:4px;">
+      <div class="qc-title" style="font-size:13px;">📋 Basic QC Summary</div>
+      <div style="display:flex;flex-wrap:wrap;gap:18px;margin-top:10px;
+        font-size:12px;color:#d8e8ff;">
+        <span>{_icon(_has_geo,_geo_ok)} Geometry QC</span>
+        <span>{_icon(_has_sq,_sq_ok)} Square 50mm</span>
+        <span>{_icon(_has_lin,_lin_ok)} CT Linearity</span>
+        <span>{_icon(_has_acc,_acc_ok)} CT Accuracy</span>
+        <span>{_icon(_has_acc,_uni_ok)} Uniformity</span>
+        <span>{_icon(_has_nz,_nz_disp_ok)} Noise QC</span>
+        <span>{_icon(_has_st,_st_ok)} Slice Thickness</span>
+        <span>{_icon(_has_lc,_lc_ok)} Low Contrast</span>
+        <span>{_icon(_has_sr,_sr_ok)} Spatial Resolution</span>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    _all_done = all([_has_geo, _has_sq, _has_lin, _has_acc,
+                     _has_nz, _has_st, _has_lc, _has_sr])
+    if _all_done:
+        _nz_real_pass = (st.session_state.get("basic_noise_result") or {}).get("pass")
+        _all_ok = all([_geo_ok, _sq_ok, _lin_ok, _acc_ok, _uni_ok,
+                       _st_ok, _lc_ok, _sr_ok,
+                       (_nz_real_pass is True or _nz_real_pass is None)])
+        if _all_ok:
+            st.markdown(
+                '<div class="okbox" style="font-size:13px;font-weight:700;">'
+                '🟢 ALL BASIC QC TESTS PASSED</div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div class="warnbox" style="font-size:13px;font-weight:700;">'
+                '🔴 SOME TESTS FAILED — Review results above</div>',
+                unsafe_allow_html=True)
 # ─────────────────────────── VIEWER PAGE ──────────────────────────────────
 if _page == "viewer":
     _topbar("DICOM Viewer", "📷")
@@ -6294,7 +6667,7 @@ if _page in ("advqc", "simulation"):
         with col_wl_pv:
             st.session_state.wl = st.slider("Window Level (WL)", -1000, 1000, st.session_state.get("wl", 100), key="pve_wl_sl")
         with col_ww_pv:
-            st.session_state.ww = st.slider("Window Width (WW)", 1, 2000, st.session_state.get("ww", 400), key="pve_ww_sl")
+            st.session_state.ww = st.slider("Window Width (WW)", 1, 1000, st.session_state.get("ww", 400), key="pve_ww_sl")
 
         col_pv1, col_pv2 = st.columns(2)
         with col_pv1:
